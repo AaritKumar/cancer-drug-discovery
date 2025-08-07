@@ -1,36 +1,90 @@
 """
-EGFR Molecular Docking Validation Pipeline (Mac ARM64 Compatible)
-Validates your drug discovery candidates against EGFR crystal structures
+EGFR Molecular Docking Validation Pipeline (Simulated)
+======================================================
 
-Requirements:
-pip install rdkit biopython numpy pandas matplotlib seaborn requests scipy
+This script provides a simulated pipeline for performing molecular docking validation on the top
+drug candidates discovered by the GNN model. Molecular docking is a computational technique
+that predicts the preferred orientation of one molecule (the ligand, our drug candidate) when
+bound to a second (the receptor, our EGFR protein target) to form a stable complex.
 
-Usage: python molecular_docking_validation.py
+**Important Note**: This script *simulates* the docking process. It does not require the
+installation of external, complex molecular docking software like AutoDock Vina. Instead, it
+uses an empirical scoring function based on key molecular properties to estimate the binding
+affinity. This provides a rapid, accessible way to validate and rank drug candidates based on
+physicochemical principles that are highly correlated with real docking scores.
+
+The pipeline performs the following key steps:
+1.  **Defines Candidates and Targets**: It specifies the top drug candidates from the virtual
+    screen and a set of known EGFR protein crystal structures from the Protein Data Bank (PDB).
+2.  **Ligand Preparation**: For each drug candidate, it converts the 2D SMILES string into a
+    3D molecular structure, generating multiple possible conformations (3D shapes) and
+    selecting the one with the lowest energy for the most stable representation.
+3.  **Simulated Docking**: It calculates a simulated "binding affinity" score for each candidate.
+    This score is a weighted combination of various molecular descriptors (e.g., molecular weight,
+    LogP, number of aromatic rings, flexibility) that are known to be important for strong
+    protein-ligand binding.
+4.  **Pharmacophore Analysis**: It analyzes the presence of key chemical features (pharmacophores)
+    in the candidates, such as hydrogen bond donors/acceptors and aromatic rings, which are
+    critical for interacting with the EGFR binding pocket.
+5.  **Comparison with Reference Drugs**: The script also processes and scores known FDA-approved
+    EGFR inhibitors (like Erlotinib and Osimertinib) to provide a benchmark for comparison.
+6.  **Report Generation**: Finally, it generates a comprehensive report that includes:
+    - A comparison of the binding affinities of the novel candidates vs. approved drugs.
+    - Plots visualizing the results.
+    - A detailed text summary of the findings, ranking the candidates and providing a
+      conclusion on their potential.
+
+This script serves as the crucial final step in the computational pipeline, providing an
+in-silico validation of the GNN's predictions and helping to prioritize the most promising
+candidates for real-world experimental testing.
+
+Usage:
+    python molecular_docking.py
 """
 
+# --- Core Imports ---
 import os
 import sys
 import pandas as pd
 import numpy as np
-from rdkit import Chem
-from rdkit.Chem import AllChem, Descriptors, Crippen, rdMolAlign
-from rdkit.Chem import rdMolTransforms, rdFreeSASA
-from rdkit.Chem.Pharm3D import Pharmacophore
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import requests
 import warnings
 from scipy.spatial.distance import euclidean
+
+# --- RDKit for Cheminformatics ---
+# RDKit is a powerful open-source toolkit for cheminformatics.
+from rdkit import Chem
+from rdkit.Chem import AllChem, Descriptors, Crippen, rdMolAlign, rdMolTransforms, rdFreeSASA
+from rdkit.Chem.Pharm3D import Pharmacophore
+
+# Suppress minor warnings for a cleaner output.
 warnings.filterwarnings('ignore')
 
+# =====================================================================================
+#  The Main Molecular Docking Class
+# =====================================================================================
+
 class EGFRMolecularDocking:
+    """
+    A class to encapsulate the entire simulated molecular docking pipeline.
+    """
+
     def __init__(self, output_dir="docking_results"):
-        """Initialize the molecular docking pipeline"""
+        """
+        Initializes the molecular docking pipeline.
+
+        Args:
+            output_dir (str): The directory where all results, structures, and reports will be saved.
+        """
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(exist_ok=True)
-        
-        # Your top drug discovery candidates
+        self.output_dir.mkdir(exist_ok=True)  # Create the output directory if it doesn't exist.
+
+        # --- Hardcoded Data for Demonstration ---
+        # In a real-world scenario, this data would be loaded from the output of the drug_discovery.py script.
+        # Here, we hardcode a few of the top candidates for a self-contained validation script.
         self.top_candidates = {
             'CHEMBL5193149': {
                 'smiles': 'COc1cc(N2CCC(N3CC[C@H](N(C)C)C3)CC2)c(C)cc1Nc1ncc(Br)c(Nc2ccc3c(c2P(C)(C)=O)OCCO3)n1',
@@ -48,25 +102,27 @@ class EGFRMolecularDocking:
                 'rank': 67
             }
         }
-        
-        # EGFR crystal structures (PDB IDs)
+
+        # A selection of relevant EGFR crystal structures from the Protein Data Bank (PDB).
+        # These represent different states of the protein (e.g., with different mutations or bound to different drugs).
         self.egfr_structures = {
             '1M17': 'EGFR kinase domain (wild-type)',
             '2J6M': 'EGFR with gefitinib',
-            '4HJO': 'EGFR with erlotinib', 
+            '4HJO': 'EGFR with erlotinib',
             '5CAV': 'EGFR with osimertinib',
-            '6LUD': 'EGFR T790M mutant',
-            '4I23': 'EGFR L858R mutant'
+            '6LUD': 'EGFR T790M mutant',  # A common resistance mutation
+            '4I23': 'EGFR L858R mutant'  # An activating mutation
         }
-        
-        # Reference compounds for comparison
+
+        # A set of FDA-approved EGFR inhibitors to use as a baseline for performance comparison.
         self.reference_compounds = {
             'Erlotinib': 'Cc1cc2ncnc(Nc3cccc(C#C)c3)c2cc1OCCOCCOC',
             'Gefitinib': 'COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCCN1CCOCC1',
             'Osimertinib': 'COc1cc(N(C)CCN(C)C)c(NC(=O)C=C)cc1Nc1nccc(c1)n1ccc(N)c(C)c1=O'
         }
-        
-        # EGFR binding site key coordinates (from crystallography)
+
+        # Coordinates of key amino acid residues in the EGFR binding pocket.
+        # This is not used in the simulation but is included for completeness and potential future use.
         self.binding_site_residues = {
             'MET793': [-30.2, 4.8, 15.1],
             'LEU718': [-32.1, 2.1, 17.3],
@@ -77,9 +133,19 @@ class EGFRMolecularDocking:
             'CYS797': [-26.4, 5.7, 18.2],
             'LEU777': [-33.2, 7.1, 13.5]
         }
-        
-    def calculate_molecular_descriptors(self, mol):
-        """Calculate comprehensive molecular descriptors"""
+
+    def calculate_molecular_descriptors(self, mol: Chem.Mol) -> dict:
+        """
+        Calculates a comprehensive set of molecular descriptors for a given RDKit molecule object.
+        These descriptors are numerical values that quantify various aspects of a molecule's
+        physicochemical properties.
+
+        Args:
+            mol (rdkit.Chem.Mol): The RDKit molecule object.
+
+        Returns:
+            dict: A dictionary of calculated descriptors, or None if an error occurs.
+        """
         try:
             descriptors = {
                 'MW': Descriptors.MolWt(mol),
@@ -89,61 +155,77 @@ class EGFRMolecularDocking:
                 'TPSA': Descriptors.TPSA(mol),
                 'RotBonds': Descriptors.NumRotatableBonds(mol),
                 'AromaticRings': Descriptors.NumAromaticRings(mol),
+                # Flexibility is normalized by the number of heavy atoms.
                 'Flexibility': Descriptors.NumRotatableBonds(mol) / Descriptors.HeavyAtomCount(mol),
+                # Bertz Complexity Index is a measure of molecular complexity.
                 'Complexity': Descriptors.BertzCT(mol),
+                # Fraction of sp3 hybridized carbons, a measure of saturation.
                 'Saturation': Descriptors.FractionCsp3(mol),
-                'QED': Descriptors.qed(mol)  # Drug-likeness score
+                # Quantitative Estimate of Drug-likeness (QED), a score from 0 to 1.
+                'QED': Descriptors.qed(mol)
             }
             return descriptors
         except:
             return None
-    
-    def prepare_ligand_advanced(self, smiles, compound_id):
-        """Advanced ligand preparation with multiple conformers"""
+
+    def prepare_ligand_advanced(self, smiles: str, compound_id: str) -> dict:
+        """
+        Prepares a ligand molecule for docking. This is a crucial step that involves
+        converting the 2D SMILES string into a 3D structure. To account for molecular
+        flexibility, it generates multiple possible 3D conformations (shapes) and then
+        selects the most stable one (lowest energy).
+
+        Args:
+            smiles (str): The SMILES string of the ligand.
+            compound_id (str): A unique identifier for the ligand.
+
+        Returns:
+            dict: A dictionary containing the prepared RDKit molecule object, the ID of the
+                  best conformer, the path to the saved 3D structure file, the calculated
+                  descriptors, and the energies of all generated conformers. Returns None on failure.
+        """
         print(f"🧬 Preparing ligand: {compound_id}")
-        
+
         try:
-            # Create molecule from SMILES
+            # Create a molecule object from the SMILES string.
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
                 print(f"   ❌ Invalid SMILES: {smiles}")
                 return None
-            
-            # Add hydrogens
+
+            # Add hydrogen atoms to the molecule, which are often implicit in SMILES.
             mol = Chem.AddHs(mol)
-            
-            # Generate multiple conformers for better sampling
+
+            # Generate multiple 3D conformations to explore the molecule's conformational space.
             conformer_ids = AllChem.EmbedMultipleConfs(mol, numConfs=10, randomSeed=42)
-            
-            # Optimize each conformer
+
+            # Optimize the geometry of each conformer using a molecular mechanics force field (MMFF).
+            # This refines the 3D structure to be more physically realistic.
             for conf_id in conformer_ids:
                 AllChem.MMFFOptimizeMolecule(mol, confId=conf_id)
-            
-            # Select best conformer (lowest energy)
+
+            # Find the conformer with the lowest energy, which is considered the most stable.
             energies = []
             for conf_id in conformer_ids:
                 props = AllChem.MMFFGetMoleculeProperties(mol)
                 ff = AllChem.MMFFGetMoleculeForceField(mol, props, confId=conf_id)
-                if ff:
-                    energies.append(ff.CalcEnergy())
-                else:
-                    energies.append(float('inf'))
-            
+                energies.append(ff.CalcEnergy() if ff else float('inf'))
+
             best_conf_id = conformer_ids[np.argmin(energies)]
-            
-            # Calculate molecular descriptors
+
+            # Calculate descriptors for the prepared molecule.
             descriptors = self.calculate_molecular_descriptors(mol)
-            
-            # Save structure
+
+            # Save the 3D structure of the best conformer to an SDF (Structure-Data File).
             sdf_file = self.output_dir / f"{compound_id}.sdf"
             writer = Chem.SDWriter(str(sdf_file))
             writer.write(mol, confId=best_conf_id)
             writer.close()
-            
+
             print(f"   ✅ Generated {len(conformer_ids)} conformers")
             print(f"   Best conformer energy: {min(energies):.2f} kcal/mol")
             print(f"   QED Drug-likeness: {descriptors['QED']:.3f}")
-            
+
             return {
                 'mol': mol,
                 'best_conformer': best_conf_id,
@@ -151,7 +233,7 @@ class EGFRMolecularDocking:
                 'descriptors': descriptors,
                 'conformer_energies': energies
             }
-            
+
         except Exception as e:
             print(f"   ❌ Error preparing {compound_id}: {e}")
             return None
